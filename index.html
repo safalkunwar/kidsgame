@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Pro Bike Adventure 🚴</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root{
+      --ground-h: 10vh;
+      --ui-pad: 1.2vh;
+    }
+    *{box-sizing:border-box}
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: linear-gradient(to top,#87ceeb,#e0f7fa);
+      font-family: Arial, Helvetica, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* Game area */
+    #game {
+      width: 100vw;
+      height: 90vh;
+      position: relative;
+      margin: 0 auto;
+      overflow: hidden;
+      background: linear-gradient(to top,#cfefff 0%, #87ceeb 60%, #7ad0f0 100%);
+    }
+
+    /* Layers */
+    .sun { position:absolute; top:4vh; left:6vw; font-size:8vh; z-index:0; filter: drop-shadow(0 6px 6px rgba(0,0,0,0.12)); }
+    .bg-layer { position:absolute; left:0; top:0; width:200vw; height:100%; pointer-events:none; }
+    .mountain { position:absolute; bottom: var(--ground-h); width:0; height:0; border-left:12vh solid transparent; border-right:12vh solid transparent; border-bottom:18vh solid #4d6b2d; opacity:0.7; z-index:1; }
+    .mountain.mid { border-left:18vh solid transparent; border-right:18vh solid transparent; border-bottom:26vh solid #3e5c2a; opacity:0.65; z-index:1; }
+    .cloud { position: absolute; background: #fff; border-radius: 99px; opacity:0.9; z-index:0; }
+
+    /* Ground */
+    #ground {
+      position: absolute;
+      bottom: 0;
+      left: 0;
+      width: 200%;
+      height: var(--ground-h);
+      background: repeating-linear-gradient(
+        90deg,
+        #5c4033,
+        #5c4033 4vh,
+        #7b4f35 4vh,
+        #7b4f35 8vh
+      );
+      z-index:3;
+      box-shadow: 0 -4px 12px rgba(0,0,0,0.12) inset;
+    }
+
+    /* Player bike */
+    #player {
+      font-size: 8vh;
+      position: absolute;
+      left: 14vw;
+      bottom: calc(var(--ground-h) + 0vh);
+      z-index: 6;
+      transition: filter 0.15s linear;
+      will-change: transform, bottom;
+      text-shadow: 0 6px 6px rgba(0,0,0,0.12);
+    }
+
+    /* Entities (obstacles, ramp, booster, coins) */
+    .entity {
+      position: absolute;
+      font-size: 6vh;
+      z-index: 5;
+      will-change: transform, left, bottom;
+      text-shadow: 0 6px 6px rgba(0,0,0,0.10);
+    }
+    .ramp { font-size: 7vh; } /* using emoji placeholder ⛰️ (or small ramp) */
+
+    /* UI */
+    #score {
+      position: absolute;
+      top: var(--ui-pad);
+      left: var(--ui-pad);
+      z-index: 20;
+      background: rgba(255,255,255,0.86);
+      padding: calc(var(--ui-pad)) calc(var(--ui-pad)*1.5);
+      border-radius: 0.8vh;
+      font-weight: 700;
+      font-size: 2.2vh;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+    }
+
+    #gameOver {
+      display:none;
+      position:absolute;
+      z-index:40;
+      left:50%; top:50%;
+      transform:translate(-50%,-50%);
+      background:#fff;
+      padding:2.4vh 3vh;
+      border-radius:1.2vh;
+      box-shadow: 0 12px 36px rgba(0,0,0,0.25);
+      text-align:center;
+      font-size: 2.6vh;
+    }
+    #gameOver button{
+      margin-top:1.2vh;
+      padding:0.9vh 1.6vh;
+      font-size:2.1vh;
+      background:#ff7eb3;color:#fff;border:none;border-radius:0.9vh;cursor:pointer;
+    }
+    /* Boost glow */
+    .boost-glow { filter: drop-shadow(0 12px 18px rgba(255,215,0,0.45)); transform: translateY(-0.6vh); }
+
+    /* small responsive tweaks */
+    @media (max-width:600px){
+      #player { left: 10vw; font-size: 10vh; }
+      .entity { font-size: 8.5vh; }
+      .cloud { top:8vh; }
+    }
+  </style>
+</head>
+<body>
+  <div id="game" aria-label="Bike adventure game">
+    <div class="sun">☀️</div>
+    <!-- background layers will be generated dynamically -->
+    <div id="ground" aria-hidden="true"></div>
+    <div id="player" aria-hidden="true">🚴</div>
+
+    <div id="score" aria-live="polite">Score: 0</div>
+    <div id="gameOver" role="dialog" aria-hidden="true">
+      <div id="gameOverText">Game Over 💥</div>
+      <button onclick="restartGame()">Play Again</button>
+    </div>
+  </div>
+
+  <script>
+    /* -----------------------
+       Game constants & state
+       ----------------------- */
+    const game = document.getElementById('game');
+    const playerEl = document.getElementById('player');
+    const scoreEl = document.getElementById('score');
+    const gameOverEl = document.getElementById('gameOver');
+    const gameOverText = document.getElementById('gameOverText');
+
+    let entities = []; // {el,type,xVW,yVH,widthVH}
+    let clouds = [];
+    let mountains = [];
+    let score = 0;
+    let running = true;
+    let baseSpeedVW = 0.45; // how many vw per frame baseline at 60fps
+    let speedVW = baseSpeedVW;
+    let boosted = false;
+
+    // player physics (units in vh)
+    let playerBottomVH = 10;               // current bottom (vh above ground)
+    let playerVelocity = 0;                // velocity in vh per frame
+    let gravityVH = -0.55 * (innerHeight / 800); // scale gravity a little with screen
+    let isJumping = false;
+    let playerLeftVW = 14;                 // controls left position
+    let pedaling = true;
+    let pedalingTimer = 0;
+
+    // useful helpers
+    const vwToPx = v => v * innerWidth / 100;
+    const vhToPx = v => v * innerHeight / 100;
+
+    /* -----------------------
+       Setup background (parallax)
+       ----------------------- */
+    function spawnBackground() {
+      // mountains layer (far)
+      for (let i = 0; i < 5; i++) {
+        const m = document.createElement('div');
+        m.className = 'mountain';
+        m.style.left = (10 + i * 40) + 'vw';
+        m.style.bottom = '9vh';
+        m.style.transform = `translateX(${0}vw)`;
+        m.dataset.x = (10 + i * 40);
+        game.appendChild(m);
+        mountains.push({el: m, speedFactor: 0.12, xVW: 10 + i * 40});
+      }
+      // middle mountains
+      for (let i = 0; i < 4; i++) {
+        const m = document.createElement('div');
+        m.className = 'mountain mid';
+        m.style.left = (25 + i * 35) + 'vw';
+        m.style.bottom = '9vh';
+        m.dataset.x = (25 + i * 35);
+        game.appendChild(m);
+        mountains.push({el: m, speedFactor: 0.24, xVW: 25 + i * 35});
+      }
+
+      // clouds
+      for (let i = 0; i < 6; i++) {
+        createCloud(6 + i * 18);
+      }
+    }
+
+    function createCloud(startX = 100) {
+      const c = document.createElement('div');
+      c.className = 'cloud';
+      const width = 8 + Math.random() * 12; // vw
+      const height = width * 0.5;
+      const top = 6 + Math.random() * 18; // vh
+      c.style.width = width + 'vw';
+      c.style.height = height + 'vh';
+      c.style.left = startX + 'vw';
+      c.style.top = top + 'vh';
+      c.dataset.x = startX;
+      game.appendChild(c);
+      clouds.push({el: c, xVW: startX, speedFactor: 0.06 + Math.random() * 0.06});
+    }
+
+    /* -----------------------
+       Entities: obstacles, ramp, booster, coin
+       Entities move in vw coordinates, bottom in vh
+       ----------------------- */
+    function spawnEntity(type) {
+      const el = document.createElement('div');
+      el.className = 'entity ' + (type === 'ramp' ? 'ramp' : '');
+      let yVH = 10; // default ground-level
+      if (type === 'coin') yVH = 22;
+      if (type === 'booster') yVH = 18;
+      if (type === 'ramp') yVH = 10;
+      // pick emoji/text
+      if (type === 'obstacle') el.textContent = Math.random() < 0.5 ? '🪨' : '🚧';
+      else if (type === 'ramp') el.textContent = '🛞'; // ramp placeholder / wheel emoji
+      else if (type === 'booster') el.textContent = '⚡';
+      else if (type === 'coin') el.textContent = '💰';
+
+      // initial x in vw (start off-screen to the right)
+      const startX = 110 + Math.random() * 40;
+      el.style.left = startX + 'vw';
+      el.style.bottom = yVH + 'vh';
+      game.appendChild(el);
+
+      entities.push({
+        el,
+        type,
+        xVW: startX,
+        yVH,
+        widthVW: (el.getBoundingClientRect().width / innerWidth) * 100 || 6 // fallback width
+      });
+    }
+
+    /* -----------------------
+       Collision detection
+       ----------------------- */
+    function collides(elemA, elemB) {
+      const a = elemA.getBoundingClientRect();
+      const b = elemB.getBoundingClientRect();
+      return !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
+    }
+
+    /* -----------------------
+       Boost / coin / jump effects
+       ----------------------- */
+    function activateBoost() {
+      if (boosted) return;
+      boosted = true;
+      speedVW = baseSpeedVW * 2.1;
+      playerEl.classList.add('boost-glow');
+      setTimeout(() => {
+        boosted = false;
+        speedVW = baseSpeedVW;
+        playerEl.classList.remove('boost-glow');
+      }, 5000);
+    }
+
+    function pickupCoin(e) {
+      score += 20;
+      updateScore();
+      e.remove();
+    }
+
+    function rampHit() {
+      // stronger jump when hitting ramp
+      if (!isJumping) {
+        playerVelocity = 26; // big impulse (vh per frame)
+        isJumping = true;
+      }
+    }
+
+    /* -----------------------
+       Game loop (rAF)
+       ----------------------- */
+    let lastTime = 0;
+    function gameLoop(time) {
+      if (!running) return;
+      const dt = Math.min(32, time - lastTime); // cap dt
+      lastTime = time;
+
+      // physics update: velocity & position (vh)
+      playerBottomVH += playerVelocity * (dt / 16.67); // normalized to ~60fps
+      playerVelocity += gravityVH * (dt / 16.67);
+      if (playerBottomVH <= 10) {
+        playerBottomVH = 10;
+        playerVelocity = 0;
+        isJumping = false;
+      }
+      playerEl.style.bottom = (playerBottomVH) + 'vh';
+
+      // pedaling animation
+      pedalingTimer += dt;
+      if (!isJumping && pedalingTimer > 220) {
+        playerEl.textContent = playerEl.textContent === '🚴' ? '🚵' : '🛸';
+        pedalingTimer = 0;
+      }
+
+      // update clouds (parallax)
+      clouds.forEach((c) => {
+        c.xVW -= speedVW * c.speedFactor * (dt / 16.67);
+        if (c.xVW < -30) c.xVW = 140;
+        c.el.style.left = c.xVW + 'vw';
+      });
+
+      // update mountains (slower parallax)
+      mountains.forEach((m) => {
+        m.xVW -= speedVW * m.speedFactor * (dt / 16.67);
+        if (m.xVW < -40) m.xVW = 160 + Math.random() * 40;
+        m.el.style.left = m.xVW + 'vw';
+      });
+
+      // update entities (obstacles/coins/boosters/ramps)
+      for (let i = entities.length - 1; i >= 0; i--) {
+        const obj = entities[i];
+        // movement leftwards (vw)
+        obj.xVW -= speedVW * (dt / 16.67);
+        obj.el.style.left = obj.xVW + 'vw';
+
+        // collision with player
+        if (collides(playerEl, obj.el)) {
+          if (obj.type === 'obstacle') {
+            // explode / end
+            endGame();
+            return;
+          } else if (obj.type === 'booster') {
+            activateBoost();
+            obj.el.remove();
+            entities.splice(i, 1);
+            continue;
+          } else if (obj.type === 'coin') {
+            pickupCoin(obj.el);
+            entities.splice(i, 1);
+            continue;
+          } else if (obj.type === 'ramp') {
+            rampHit();
+            // remove ramp gently
+            obj.el.remove();
+            entities.splice(i, 1);
+            continue;
+          }
+        }
+
+        // remove if off-screen
+        if (obj.xVW < -12) {
+          obj.el.remove();
+          entities.splice(i, 1);
+        }
+      }
+
+      // increase score constantly (faster when boosted)
+      score += Math.round((1 + (boosted ? 1.2 : 0)) * (dt / 16.67));
+      updateScore();
+
+      // progressive difficulty: slightly increase baseSpeed over time
+      if (score % 200 === 0) {
+        baseSpeedVW = Math.min(1.2, baseSpeedVW + 0.02);
+        if (!boosted) speedVW = baseSpeedVW;
+      }
+
+      requestAnimationFrame(gameLoop);
+    }
+
+    /* -----------------------
+       Spawners (timers)
+       ----------------------- */
+    let spawnTimer;
+    function startSpawning() {
+      spawnTimer = setInterval(() => {
+        if (!running) return;
+        const r = Math.random();
+        if (r < 0.14) spawnEntity('ramp');
+        else if (r < 0.28) spawnEntity('booster');
+        else if (r < 0.48) spawnEntity('coin');
+        else spawnEntity('obstacle');
+      }, 1300 + Math.random() * 900); // semi-random intervals
+    }
+    
+
+    /* -----------------------
+       Input & controls
+       ----------------------- */
+ function jump(overrideStrength) {
+  if (!isJumping) {
+    const strength = overrideStrength ?? 7 + (innerHeight / 1000); // lower jump
+    playerVelocity = strength;
+    isJumping = true;
+  }
+}
+
+    function pedalForward() {
+      playerLeftVW = Math.min(40, playerLeftVW + 1.2);
+      playerEl.style.left = playerLeftVW + 'vw';
+    }
+    function pedalBackward() {
+      playerLeftVW = Math.max(10, playerLeftVW - 1.2);
+      playerEl.style.left = playerLeftVW + 'vw';
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.code === 'Space') { e.preventDefault(); jump(); }
+      if (e.code === 'ArrowRight') pedalForward();
+      if (e.code === 'ArrowLeft') pedalBackward();
+    });
+
+    // mobile: tap to jump, swipe right to pedal
+    let touchStartX = null;
+    document.addEventListener('touchstart', (ev) => {
+      if (ev.touches.length === 1) {
+        touchStartX = ev.touches[0].clientX;
+        jump();
+      }
+    });
+    document.addEventListener('touchmove', (ev) => {
+      if (!touchStartX) return;
+      const dx = ev.touches[0].clientX - touchStartX;
+      if (dx > 40) { pedalForward(); touchStartX = ev.touches[0].clientX; }
+      if (dx < -40) { pedalBackward(); touchStartX = ev.touches[0].clientX; }
+    });
+    document.addEventListener('touchend', () => { touchStartX = null; });
+
+    /* -----------------------
+       Score & UI
+       ----------------------- */
+    function updateScore() {
+      scoreEl.textContent = 'Score: ' + Math.max(0, Math.round(score));
+    }
+
+    /* -----------------------
+       Start / End / Restart
+       ----------------------- */
+    function startGame() {
+      // reset
+      entities.forEach(o => o.el.remove());
+      entities = [];
+      clouds.forEach(c => c.el.remove()); clouds = [];
+      mountains.forEach(m => m.el.remove()); mountains = [];
+      score = 0;
+      running = true;
+      baseSpeedVW = 0.45;
+      speedVW = baseSpeedVW;
+      boosted = false;
+      playerBottomVH = 10;
+      playerVelocity = 0;
+      isJumping = false;
+      playerLeftVW = 14;
+      playerEl.style.left = playerLeftVW + 'vw';
+      playerEl.style.bottom = (playerBottomVH) + 'vh';
+      playerEl.textContent = '🚴';
+      playerEl.classList.remove('boost-glow');
+      updateScore();
+      gameOverEl.style.display = 'none';
+      spawnBackground();
+      startSpawning();
+      lastTime = performance.now();
+      requestAnimationFrame(gameLoop);
+    }
+
+    function endGame() {
+      running = false;
+      // stop spawn
+      clearInterval(spawnTimer);
+      // show explosion effect
+      playerEl.textContent = '💥';
+      playerEl.style.filter = 'none';
+      // clear entities
+      entities.forEach(o => o.el.remove());
+      entities = [];
+      setTimeout(() => {
+        gameOverText.textContent = '💥 Nice Try!';
+        gameOverEl.style.display = 'block';
+      }, 350);
+    }
+
+    function restartGame() {
+      // remove background elements
+      clouds.forEach(c => c.el.remove()); clouds = [];
+      mountains.forEach(m => m.el.remove()); mountains = [];
+      startGame();
+    }
+
+    /* -----------------------
+       Initialize & start
+       ----------------------- */
+    spawnBackground();
+    startSpawning();
+    lastTime = performance.now();
+    requestAnimationFrame(gameLoop);
+
+    // Expose restart so button can call it
+    window.restartGame = restartGame;
+
+    // Accessibility: allow keyboard restart when game over
+    document.addEventListener('keydown', (e) => {
+      if (!running && e.code === 'Enter') restartGame();
+    });
+  </script>
+</body>
+</html>
